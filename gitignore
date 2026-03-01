@@ -1,0 +1,24 @@
+# 金鑰與機密資訊（絕對不要上傳）
+credentials.json
+.env
+
+# Docker
+docker-compose.yml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

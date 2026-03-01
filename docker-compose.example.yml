@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  line-calendar-bot:
+    build: .
+    container_name: line-calendar-bot
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - LINE_CHANNEL_SECRET=你的Line_Channel_Secret
+      - LINE_CHANNEL_ACCESS_TOKEN=你的Line_Channel_Access_Token
+      - ANTHROPIC_API_KEY=你的Claude_API_Key
+      - GOOGLE_CALENDAR_ID=你的Google日曆ID
+      - ADMIN_USER_ID=你的Line_User_ID
+      - REPORT_HOUR=18
+      - PORT=8000
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
