@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  line-calendar-bot:
+    build: .
+    container_name: line-calendar-bot
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - LINE_CHANNEL_SECRET=在這裡填入你的Line_Channel_Secret
+      - LINE_CHANNEL_ACCESS_TOKEN=在這裡填入你的Line_Channel_Access_Token
+      - ANTHROPIC_API_KEY=在這裡填入你的Claude_API_Key
+      - GOOGLE_CALENDAR_ID=在這裡填入你的Google日曆ID
+      - ADMIN_USER_ID=在這裡填入你的Line_User_ID
+      - NAS_EXTERNAL_URL=在這裡填入你的NAS外部網址(例如https://yourname.synology.me:58443)
+      - REPORT_HOUR=18
+      - PORT=8000
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+      - ./reports:/app/reports

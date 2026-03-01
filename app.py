@@ -26,6 +26,11 @@ GOOGLE_CREDENTIALS_PATH = "/app/credentials.json"
 PORT = int(os.environ.get("PORT", "8000"))
 REPORT_HOUR = int(os.environ.get("REPORT_HOUR", "18"))
 ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID", "")
+NAS_EXTERNAL_URL = os.environ.get("NAS_EXTERNAL_URL", "")  # 例如 https://yourname.synology.me:58443
+REPORT_DIR = "/app/reports"
+
+# 建立報表資料夾
+os.makedirs(REPORT_DIR, exist_ok=True)
 
 # ===== 時區 =====
 TW_TZ = timezone(timedelta(hours=8))
@@ -480,7 +485,7 @@ def generate_daily_report_excel():
     return buf
 
 def send_daily_report():
-    """每日報表：傳送文字摘要 + Excel 檔案到管理員私訊"""
+    """每日報表：產生 Excel 並傳送下載連結到管理員私訊"""
     if not ADMIN_USER_ID:
         logger.warning("ADMIN_USER_ID not set, skipping daily report")
         return
@@ -490,46 +495,56 @@ def send_daily_report():
     now = datetime.now(TW_TZ)
     date_str = now.strftime("%m/%d")
 
-    # 文字摘要
-    text_lines = [f"📊 今日行程更新報表（{date_str}）", ""]
-    if daily_event_log:
-        text_lines.append(f"共 {len(daily_event_log)} 筆行程更新：")
-        text_lines.append("")
-        for entry in daily_event_log:
-            text_lines.append(
-                f"• {entry['meeting_date']} | {entry['staff'] or '-'} | "
-                f"{entry['location_city'] or '-'} | {entry['title']} | "
-                f"{entry['attendees'] or '-'}"
-            )
-    else:
-        text_lines.append("今日無新增或修改的行程。")
+    if not daily_event_log:
+        push_message(ADMIN_USER_ID, f"📊 今日行程更新報表（{date_str}）\n\n今日無新增或修改的行程。")
+        daily_event_log = []
+        logger.info("Daily report sent (no events)")
+        return
 
-    push_message(ADMIN_USER_ID, "\n".join(text_lines))
+    # 產生 Excel 並存檔
+    try:
+        excel_buf = generate_daily_report_excel()
+        filename = f"行程報表_{now.strftime('%Y%m%d')}.xlsx"
+        filepath = os.path.join(REPORT_DIR, filename)
 
-    # 產生並上傳 Excel
-    if daily_event_log:
-        try:
-            excel_buf = generate_daily_report_excel()
-            filename = f"行程報表_{now.strftime('%Y%m%d')}.xlsx"
+        with open(filepath, "wb") as f:
+            f.write(excel_buf.read())
 
-            # 使用 Line Messaging API 的 Blob Upload 傳送檔案
-            # Step 1: 建立上傳 session
-            create_url = "https://api-data.line.me/v2/bot/message/push"
+        logger.info(f"Excel report saved: {filepath}")
 
-            # Line Messaging API 透過 push message 傳送檔案
-            # 需要先用 Content Upload API
-            upload_url = "https://api-data.line.me/v3/blob/upload"
-            headers = {
-                "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-                "Content-Type": "application/octet-stream",
-                "X-Line-Filename": filename,
-            }
+        # 清理 7 天前的舊報表
+        for old_file in os.listdir(REPORT_DIR):
+            old_path = os.path.join(REPORT_DIR, old_file)
+            if os.path.isfile(old_path):
+                file_age = now.timestamp() - os.path.getmtime(old_path)
+                if file_age > 7 * 86400:
+                    os.remove(old_path)
+                    logger.info(f"Deleted old report: {old_file}")
 
-            # 嘗試上傳（如果 API 不支援，退回文字版）
-            logger.info(f"Daily Excel report generated: {filename}")
+        # 組合訊息
+        text_lines = [f"📊 今日行程更新報表（{date_str}）", ""]
+        text_lines.append(f"共 {len(daily_event_log)} 筆行程更新")
 
-        except Exception as e:
-            logger.error(f"Excel report error: {e}")
+        if NAS_EXTERNAL_URL:
+            download_url = f"{NAS_EXTERNAL_URL}/reports/{filename}"
+            text_lines.append("")
+            text_lines.append(f"📥 下載 Excel 報表：")
+            text_lines.append(download_url)
+        else:
+            # 如果沒設定外部網址，改傳文字摘要
+            text_lines.append("")
+            for entry in daily_event_log:
+                text_lines.append(
+                    f"• {entry['meeting_date']} | {entry['staff'] or '-'} | "
+                    f"{entry['location_city'] or '-'} | {entry['title']} | "
+                    f"{entry['attendees'] or '-'}"
+                )
+
+        push_message(ADMIN_USER_ID, "\n".join(text_lines))
+
+    except Exception as e:
+        logger.error(f"Daily report error: {e}")
+        push_message(ADMIN_USER_ID, f"⚠️ 今日報表產生失敗：{str(e)}")
 
     # 清空 log
     daily_event_log = []
@@ -609,10 +624,37 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         logger.info(f"GET request received: {self.path} from {self.client_address}")
+
+        # 報表下載
+        if self.path.startswith("/reports/"):
+            self.serve_report()
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write("LINE Calendar Bot is running!".encode("utf-8"))
+
+    def serve_report(self):
+        """提供報表檔案下載"""
+        filename = self.path.split("/reports/", 1)[1]
+        filepath = os.path.join(REPORT_DIR, filename)
+
+        if not os.path.exists(filepath):
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Report not found")
+            return
+
+        with open(filepath, "rb") as f:
+            data = f.read()
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def handle_event(self, event):
         if event.get("type") != "message":
