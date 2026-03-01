@@ -16,8 +16,10 @@
 - 同一人重複登記會以新的覆蓋舊的
 
 ### 每日報表
-- 每天晚上 6 點自動產生當日行程更新摘要
-- 透過 LINE 私訊傳送給管理員
+- 每天晚上 6 點自動產生當日行程更新報表（Excel 格式）
+- 透過 LINE 私訊傳送 Excel 下載連結給管理員
+- 報表欄位：會議時間、幕僚、會議地點、會議名稱、出席人員
+- 自動清除 7 天前的舊報表
 
 ---
 
@@ -126,16 +128,21 @@ environment:
   - LINE_CHANNEL_ACCESS_TOKEN=你的值
   - ANTHROPIC_API_KEY=你的值
   - GOOGLE_CALENDAR_ID=你的值
-  - ADMIN_USER_ID=你的值（LINE User ID，用於接收每日報表）
+  - ADMIN_USER_ID=你的值（LINE User ID，用於接收每日報表私訊）
+  - NAS_EXTERNAL_URL=你的NAS外部網址（例如 https://yourname.synology.me:58443）
   - REPORT_HOUR=18
   - PORT=8000
 ```
+
+> **ADMIN_USER_ID** 是你的 LINE User ID，在 LINE Developers Console → Basic settings 最下方可以找到，格式像 `U1234567890abcdef...`。Bot 每天會用這個 ID 私訊報表給你。
+>
+> **NAS_EXTERNAL_URL** 是你 NAS 的外部 HTTPS 網址（和 Webhook URL 同一個，但不含 `/callback`）。用來產生 Excel 報表的下載連結。
 
 3. 將以下檔案放到 NAS 的同一個資料夾（例如 `/docker/line-calendar-bot/`）：
    - `app.py`
    - `requirements.txt`
    - `Dockerfile`
-   - `docker-compose.yml`（已填好金鑰）
+   - `docker-compose.yml`（已填好金鑰的版本）
    - `credentials.json`（Google 服務帳戶金鑰）
 
 ### 第五步：在 NAS 上啟動
@@ -220,6 +227,7 @@ sudo docker-compose up -d --build
 - **查看日誌**：`sudo docker logs --tail 50 line-calendar-bot`
 - **重啟 Bot**：`cd /volume1/docker/line-calendar-bot && sudo docker-compose restart`
 - **更新程式**：替換 `app.py` 後執行 `sudo docker-compose down && sudo docker-compose up -d --build`
+- **每日報表**：Excel 報表檔案存放在 NAS 的 `./reports/` 資料夾，自動保留 7 天
 
 ---
 
@@ -233,6 +241,7 @@ line-calendar-bot/
 ├── docker-compose.example.yml  # docker-compose 範本（不含金鑰）
 ├── docker-compose.yml          # 實際使用的設定（含金鑰，不上傳 Git）
 ├── credentials.json            # Google 服務帳戶金鑰（不上傳 Git）
+├── reports/                    # 每日報表 Excel 檔案（自動產生，保留 7 天）
 ├── .gitignore                  # Git 忽略規則
 ├── README.md                   # 本文件
 └── 部署教學.md                  # 繁體中文部署教學

@@ -13,7 +13,9 @@ services:
       - ANTHROPIC_API_KEY=你的Claude_API_Key
       - GOOGLE_CALENDAR_ID=你的Google日曆ID
       - ADMIN_USER_ID=你的Line_User_ID
+      - NAS_EXTERNAL_URL=你的NAS外部網址(例如https://yourname.synology.me:58443)
       - REPORT_HOUR=18
       - PORT=8000
     volumes:
       - ./credentials.json:/app/credentials.json:ro
+      - ./reports:/app/reports
