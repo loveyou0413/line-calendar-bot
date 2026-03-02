@@ -447,32 +447,24 @@ def generate_daily_report_excel():
     wb = Workbook()
     ws = wb.active
     now = datetime.now(TW_TZ)
-    ws.title = f"行程報表{now.strftime('%m%d')}"
+    ws.title = "Report"
 
     headers = ["會議時間", "幕僚", "會議地點", "會議名稱", "出席人員"]
-    header_font = Font(bold=True, size=11)
-    thin_border = Border(
-        left=Side(style="thin"), right=Side(style="thin"),
-        top=Side(style="thin"), bottom=Side(style="thin"),
-    )
 
+    # 寫入標題列（只設定粗體，不加邊框避免相容性問題）
     for col, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=header)
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center")
-        cell.border = thin_border
+        cell.font = Font(bold=True)
 
     if daily_event_log:
         for row_idx, entry in enumerate(daily_event_log, 2):
-            ws.cell(row=row_idx, column=1, value=entry["meeting_date"]).border = thin_border
-            ws.cell(row=row_idx, column=2, value=entry["staff"]).border = thin_border
-            ws.cell(row=row_idx, column=3, value=entry["location_city"]).border = thin_border
-            ws.cell(row=row_idx, column=4, value=entry["title"]).border = thin_border
-            ws.cell(row=row_idx, column=5, value=entry["attendees"]).border = thin_border
-    else:
-        ws.cell(row=2, column=1, value="今日無新增或修改的行程")
-        ws.merge_cells("A2:E2")
+            ws.cell(row=row_idx, column=1, value=entry["meeting_date"])
+            ws.cell(row=row_idx, column=2, value=entry["staff"])
+            ws.cell(row=row_idx, column=3, value=entry["location_city"])
+            ws.cell(row=row_idx, column=4, value=entry["title"])
+            ws.cell(row=row_idx, column=5, value=entry["attendees"])
 
+    # 設定欄寬
     ws.column_dimensions["A"].width = 12
     ws.column_dimensions["B"].width = 10
     ws.column_dimensions["C"].width = 12
@@ -504,7 +496,7 @@ def send_daily_report():
     # 產生 Excel 並存檔
     try:
         excel_buf = generate_daily_report_excel()
-        filename = f"行程報表_{now.strftime('%Y%m%d')}.xlsx"
+        filename = f"report_{now.strftime('%Y%m%d')}.xlsx"
         filepath = os.path.join(REPORT_DIR, filename)
 
         with open(filepath, "wb") as f:
@@ -638,21 +630,29 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def serve_report(self):
         """提供報表檔案下載"""
         filename = self.path.split("/reports/", 1)[1]
+        # 安全檢查：防止路徑穿越
+        if "/" in filename or "\\" in filename or ".." in filename:
+            self.send_response(403)
+            self.end_headers()
+            return
+
         filepath = os.path.join(REPORT_DIR, filename)
 
         if not os.path.exists(filepath):
             self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
-            self.wfile.write(b"Report not found")
+            self.wfile.write("Report not found".encode("utf-8"))
             return
 
         with open(filepath, "rb") as f:
             data = f.read()
 
         self.send_response(200)
-        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(data)
 
