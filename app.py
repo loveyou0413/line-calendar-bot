@@ -9,6 +9,7 @@ import time as time_module
 from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
+from urllib.parse import unquote
 
 import anthropic
 from google.oauth2 import service_account
@@ -617,8 +618,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         logger.info(f"GET request received: {self.path} from {self.client_address}")
 
+        # URL 解碼
+        decoded_path = unquote(self.path)
+
         # 報表下載
-        if self.path.startswith("/reports/"):
+        if decoded_path.startswith("/reports/"):
             self.serve_report()
             return
 
@@ -629,7 +633,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def serve_report(self):
         """提供報表檔案下載"""
-        filename = self.path.split("/reports/", 1)[1]
+        # URL 解碼（處理中文或特殊字元被編碼的情況）
+        decoded_path = unquote(self.path)
+        filename = decoded_path.split("/reports/", 1)[1]
+
         # 安全檢查：防止路徑穿越
         if "/" in filename or "\\" in filename or ".." in filename:
             self.send_response(403)
@@ -637,6 +644,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return
 
         filepath = os.path.join(REPORT_DIR, filename)
+        logger.info(f"Report download request: {filename} -> {filepath}")
+
+        # 列出目前 reports 資料夾裡的檔案（除錯用）
+        try:
+            existing_files = os.listdir(REPORT_DIR)
+            logger.info(f"Files in reports dir: {existing_files}")
+        except Exception as e:
+            logger.error(f"Cannot list reports dir: {e}")
 
         if not os.path.exists(filepath):
             self.send_response(404)
@@ -648,6 +663,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         with open(filepath, "rb") as f:
             data = f.read()
 
+        logger.info(f"Serving report: {filename} ({len(data)} bytes)")
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
