@@ -54,7 +54,7 @@ def parse_event_with_claude(message_text):
 今天的日期是 {today}。
 
 請先判斷這是「一般行程」還是「同仁請假」。
-判斷方式：如果訊息中包含「請假」、「休假」、「特休」、「病假」、「事假」、「補休」等關鍵字，就是「同仁請假」類型。
+判斷方式：如果訊息中包含「請假」、「休假」、「特休」、「病假」、「事假」、「補休」、「產假」、「產檢假」、「喪假」等關鍵字，就是「同仁請假」類型。
 
 === 如果是「一般行程」，回傳以下 JSON ===
 {{
@@ -79,7 +79,7 @@ def parse_event_with_claude(message_text):
     "type": "leave",
     "dates": ["YYYY-MM-DD"],
     "leaves": [
-        {{"name": "同仁姓名", "start_time": "HH:MM", "end_time": "HH:MM"}}
+        {{"name": "同仁姓名", "leave_type": "假別", "start_time": "HH:MM", "end_time": "HH:MM"}}
     ]
 }}
 
@@ -104,6 +104,10 @@ def parse_event_with_claude(message_text):
     - 多位人員用頓號「、」分隔
     - 例如原文「朱理事長(O) 幕僚 貝珊」應整理成 attendees: ["朱理事長(O)", "幕僚(貝珊)"]，staff: "貝珊"
 16. location_city 只填縣市簡稱：台北市→台北、新北市→新北、桃園市→桃園、台中市→台中、台南市→台南、高雄市→高雄，以此類推。如果地點是線上或無法判斷縣市則填 null
+17. 請假假別（leave_type）辨識規則：
+    - 如果訊息有註明假別，leave_type 填寫對應假別：「產假」、「產檢假」、「病假」、「喪假」、「事假」、「補休」、「特休」、「公假」、「婚假」等
+    - 如果訊息只寫「請假」或「休假」而沒有具體假別，leave_type 填 null
+    - 假別可能出現在人名前面或後面，例如「張三產檢假1小時」或「產檢假 張三1小時」
 
 訊息內容：
 {message_text}"""
@@ -217,22 +221,44 @@ def parse_existing_leaves(description):
 def format_leave_description(entries):
     return "\n".join(f"{i}.{e}" for i, e in enumerate(entries, 1))
 
+def format_leave_entry(leave):
+    """格式化單筆請假記錄：姓名+假別+時間"""
+    name = leave.get("name", "未知")
+    leave_type = leave.get("leave_type") or "請休"
+    s = leave.get("start_time", "").replace(":", "")
+    e = leave.get("end_time", "").replace(":", "")
+    if s and e:
+        return f"{name}{leave_type}{s}-{e}"
+    else:
+        return f"{name}{leave_type}（時間未指定）"
+
+def get_leave_name(entry_str):
+    """從請假記錄字串中提取人名（第一個非數字、非假別的部分）"""
+    # 假別清單，用於從字串中切割出人名
+    leave_types = ["產檢假", "產假", "病假", "喪假", "事假", "補休", "特休", "公假", "婚假", "請休"]
+    for lt in leave_types:
+        if lt in entry_str:
+            return entry_str.split(lt)[0]
+    # fallback：取到第一個數字或括號之前的部分
+    result = ""
+    for ch in entry_str:
+        if ch.isdigit() or ch in "（(":
+            break
+        result += ch
+    return result
+
 def handle_leave(event_data):
     service = get_calendar_service()
     results = []
     for date_str in event_data.get("dates", []):
         existing = find_leave_event(service, date_str)
-        new_entries = []
-        for leave in event_data.get("leaves", []):
-            name = leave.get("name", "未知")
-            s = leave.get("start_time", "").replace(":", "")
-            e = leave.get("end_time", "").replace(":", "")
-            new_entries.append(f"{name}請休{s}-{e}" if s and e else f"{name}請休（時間未指定）")
+        new_entries = [format_leave_entry(leave) for leave in event_data.get("leaves", [])]
         if existing:
             existing_leaves = parse_existing_leaves(existing.get("description", ""))
             for ne in new_entries:
-                nn = ne.split("請休")[0]
-                existing_leaves = [el for el in existing_leaves if not el.startswith(f"{nn}請休")]
+                new_name = get_leave_name(ne)
+                # 移除同一人的舊記錄（不管舊假別是什麼）
+                existing_leaves = [el for el in existing_leaves if get_leave_name(el) != new_name]
                 existing_leaves.append(ne)
             existing["description"] = format_leave_description(existing_leaves)
             service.events().update(calendarId=GOOGLE_CALENDAR_ID, eventId=existing["id"], body=existing).execute()
@@ -464,7 +490,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return
         message_text = message_text[2:].strip()
         if not message_text:
-            reply_message(reply_token, "請在「登記」後面加上行程資訊，例如：\n登記 3月15日下午兩點，A棟301會議室，產品規劃會議\n\n或請假資訊：\n登記 0213同仁請假 麗如1.5小時(09-1030)")
+            reply_message(reply_token, "請在「登記」後面加上行程資訊，例如：\n登記 3月15日下午兩點，A棟301會議室，產品規劃會議\n\n或請假資訊：\n登記 0213同仁請假 麗如1.5小時(09-1030)\n登記 0213 張三產檢假1小時(09-10)")
             return
         logger.info(f"Received message: {message_text}")
         message_timestamp = get_message_timestamp(event)
