@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import base64
 import logging
+import re
 import threading
 import time as time_module
 from datetime import datetime, timedelta, timezone
@@ -205,6 +206,8 @@ def log_daily_event(event_data):
         "attendees": "、".join(non_staff) if non_staff else "",
     })
 
+# ===== 請假相關函式 =====
+
 def find_leave_event(service, date_str):
     events_result = service.events().list(
         calendarId=GOOGLE_CALENDAR_ID, timeMin=f"{date_str}T00:00:00+08:00",
@@ -227,6 +230,41 @@ def parse_existing_leaves(description):
 def format_leave_description(entries):
     return "\n".join(f"{i}.{e}" for i, e in enumerate(entries, 1))
 
+def get_leave_name(entry_str):
+    """從請假記錄字串中提取人名"""
+    leave_types = ["產檢假", "產假", "病假", "喪假", "事假", "補休", "特休", "公假", "婚假", "請休"]
+    name_by_type = None
+    for lt in leave_types:
+        if lt in entry_str:
+            name_by_type = entry_str.split(lt)[0].rstrip("0123456789-、 ")
+            break
+    name_by_digit = ""
+    for ch in entry_str:
+        if ch.isdigit():
+            break
+        name_by_digit += ch
+    if name_by_type and name_by_digit:
+        return name_by_type if len(name_by_type) <= len(name_by_digit) else name_by_digit
+    return name_by_type or name_by_digit or entry_str
+
+def parse_segments(entry_str):
+    """從合併後的字串提取人名和所有時段片段"""
+    name = get_leave_name(entry_str)
+    rest = entry_str[len(name):]
+    return name, [s.strip() for s in rest.split("、") if s.strip()]
+
+def parse_time_range(segment):
+    """從片段中提取起訖時間"""
+    m = re.search(r"(\d{3,4})-(\d{3,4})", segment)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return None, None
+
+def times_overlap(s1, e1, s2, e2):
+    if s1 is None or s2 is None:
+        return False
+    return s1 < e2 and s2 < e1
+
 def format_leave_segment(leave):
     """格式化單筆請假的時間+假別片段（不含姓名）"""
     leave_type = leave.get("leave_type") or "請休"
@@ -238,7 +276,7 @@ def format_leave_segment(leave):
         return f"{leave_type}（時間未指定）"
 
 def merge_leave_entries(leaves):
-    """將同一人的多筆請假合併成一行，例如：張三0900-1200產檢假、1400-1800請休"""
+    """將同一人的多筆請假合併成一行"""
     grouped = OrderedDict()
     for leave in leaves:
         name = leave.get("name", "未知")
@@ -248,33 +286,58 @@ def merge_leave_entries(leaves):
         grouped[name].append(segment)
     return [f"{name}{'、'.join(segs)}" for name, segs in grouped.items()]
 
-def get_leave_name(entry_str):
-    """從請假記錄字串中提取人名（相容新舊格式）"""
-    leave_types = ["產檢假", "產假", "病假", "喪假", "事假", "補休", "特休", "公假", "婚假", "請休"]
-    for lt in leave_types:
-        if lt in entry_str:
-            return entry_str.split(lt)[0].rstrip("0123456789-、 ")
-    for i, ch in enumerate(entry_str):
-        if ch.isdigit():
-            return entry_str[:i]
-    return entry_str
+def merge_into_existing(existing_entry, new_segments):
+    """將新片段合併到既有記錄：時間不重疊→追加，重疊→覆蓋"""
+    name, existing_segs = parse_segments(existing_entry)
+    result_segs = list(existing_segs)
+    for new_seg in new_segments:
+        ns, ne = parse_time_range(new_seg)
+        result_segs = [
+            seg for seg in result_segs
+            if not times_overlap(parse_time_range(seg)[0], parse_time_range(seg)[1], ns, ne)
+        ]
+        result_segs.append(new_seg)
+    def sort_key(seg):
+        s, _ = parse_time_range(seg)
+        return s if s is not None else 9999
+    result_segs.sort(key=sort_key)
+    return f"{name}{'、'.join(result_segs)}"
 
 def handle_leave(event_data):
     service = get_calendar_service()
     results = []
     for date_str in event_data.get("dates", []):
         existing = find_leave_event(service, date_str)
-        new_entries = merge_leave_entries(event_data.get("leaves", []))
+        # 先把這次的 leaves 合併成 name -> [segments]
+        new_by_name = OrderedDict()
+        for leave in event_data.get("leaves", []):
+            name = leave.get("name", "未知")
+            seg = format_leave_segment(leave)
+            if name not in new_by_name:
+                new_by_name[name] = []
+            new_by_name[name].append(seg)
+
         if existing:
             existing_leaves = parse_existing_leaves(existing.get("description", ""))
-            for ne in new_entries:
-                new_name = get_leave_name(ne)
-                existing_leaves = [el for el in existing_leaves if get_leave_name(el) != new_name]
-                existing_leaves.append(ne)
+            for name, new_segs in new_by_name.items():
+                # 找到這個人的既有記錄
+                found_idx = None
+                for i, el in enumerate(existing_leaves):
+                    if get_leave_name(el) == name:
+                        found_idx = i
+                        break
+                if found_idx is not None:
+                    # 合併到既有記錄（不重疊追加，重疊覆蓋）
+                    merged = merge_into_existing(existing_leaves[found_idx], new_segs)
+                    existing_leaves[found_idx] = merged
+                else:
+                    # 新人，直接加入
+                    existing_leaves.append(f"{name}{'、'.join(new_segs)}")
             existing["description"] = format_leave_description(existing_leaves)
             service.events().update(calendarId=GOOGLE_CALENDAR_ID, eventId=existing["id"], body=existing).execute()
             results.append({"date": date_str, "action": "updated", "entries": existing_leaves})
         else:
+            new_entries = [f"{name}{'、'.join(segs)}" for name, segs in new_by_name.items()]
             end_date = (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
             event = {"summary": "同仁休假登記", "description": format_leave_description(new_entries),
                      "start": {"date": date_str}, "end": {"date": end_date}}
