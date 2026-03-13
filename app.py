@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
 from urllib.parse import unquote
+from collections import OrderedDict
 
 import anthropic
 from google.oauth2 import service_account
@@ -82,6 +83,11 @@ def parse_event_with_claude(message_text):
         {{"name": "同仁姓名", "leave_type": "假別", "start_time": "HH:MM", "end_time": "HH:MM"}}
     ]
 }}
+
+重要：如果同一位同仁有多個不同時段的請假，請分成多筆 leave 記錄。例如：
+「張三0900-1200產檢假、1400-1800請休」應拆成兩筆：
+{{"name": "張三", "leave_type": "產檢假", "start_time": "09:00", "end_time": "12:00"}}
+{{"name": "張三", "leave_type": null, "start_time": "14:00", "end_time": "18:00"}}
 
 規則：
 1. 如果沒有提到年份，預設使用 {current_year} 年
@@ -221,43 +227,48 @@ def parse_existing_leaves(description):
 def format_leave_description(entries):
     return "\n".join(f"{i}.{e}" for i, e in enumerate(entries, 1))
 
-def format_leave_entry(leave):
-    """格式化單筆請假記錄：姓名+假別+時間"""
-    name = leave.get("name", "未知")
+def format_leave_segment(leave):
+    """格式化單筆請假的時間+假別片段（不含姓名）"""
     leave_type = leave.get("leave_type") or "請休"
     s = leave.get("start_time", "").replace(":", "")
     e = leave.get("end_time", "").replace(":", "")
     if s and e:
-        return f"{name}{leave_type}{s}-{e}"
+        return f"{s}-{e}{leave_type}"
     else:
-        return f"{name}{leave_type}（時間未指定）"
+        return f"{leave_type}（時間未指定）"
+
+def merge_leave_entries(leaves):
+    """將同一人的多筆請假合併成一行，例如：張三0900-1200產檢假、1400-1800請休"""
+    grouped = OrderedDict()
+    for leave in leaves:
+        name = leave.get("name", "未知")
+        segment = format_leave_segment(leave)
+        if name not in grouped:
+            grouped[name] = []
+        grouped[name].append(segment)
+    return [f"{name}{'、'.join(segs)}" for name, segs in grouped.items()]
 
 def get_leave_name(entry_str):
-    """從請假記錄字串中提取人名（第一個非數字、非假別的部分）"""
-    # 假別清單，用於從字串中切割出人名
+    """從請假記錄字串中提取人名（相容新舊格式）"""
     leave_types = ["產檢假", "產假", "病假", "喪假", "事假", "補休", "特休", "公假", "婚假", "請休"]
     for lt in leave_types:
         if lt in entry_str:
-            return entry_str.split(lt)[0]
-    # fallback：取到第一個數字或括號之前的部分
-    result = ""
-    for ch in entry_str:
-        if ch.isdigit() or ch in "（(":
-            break
-        result += ch
-    return result
+            return entry_str.split(lt)[0].rstrip("0123456789-、 ")
+    for i, ch in enumerate(entry_str):
+        if ch.isdigit():
+            return entry_str[:i]
+    return entry_str
 
 def handle_leave(event_data):
     service = get_calendar_service()
     results = []
     for date_str in event_data.get("dates", []):
         existing = find_leave_event(service, date_str)
-        new_entries = [format_leave_entry(leave) for leave in event_data.get("leaves", [])]
+        new_entries = merge_leave_entries(event_data.get("leaves", []))
         if existing:
             existing_leaves = parse_existing_leaves(existing.get("description", ""))
             for ne in new_entries:
                 new_name = get_leave_name(ne)
-                # 移除同一人的舊記錄（不管舊假別是什麼）
                 existing_leaves = [el for el in existing_leaves if get_leave_name(el) != new_name]
                 existing_leaves.append(ne)
             existing["description"] = format_leave_description(existing_leaves)
