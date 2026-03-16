@@ -79,16 +79,24 @@ def parse_event_with_claude(message_text):
 === 如果是「同仁請假」，回傳以下 JSON ===
 {{
     "type": "leave",
-    "dates": ["YYYY-MM-DD"],
     "leaves": [
-        {{"name": "同仁姓名", "leave_type": "假別", "start_time": "HH:MM", "end_time": "HH:MM"}}
+        {{"name": "同仁姓名", "date": "YYYY-MM-DD", "leave_type": "假別", "start_time": "HH:MM", "end_time": "HH:MM"}}
     ]
 }}
 
-重要：如果同一位同仁有多個不同時段的請假，請分成多筆 leave 記錄。例如：
-「張三0900-1200產檢假、1400-1800請休」應拆成兩筆：
-{{"name": "張三", "leave_type": "產檢假", "start_time": "09:00", "end_time": "12:00"}}
-{{"name": "張三", "leave_type": null, "start_time": "14:00", "end_time": "18:00"}}
+注意：每筆 leave 記錄都必須包含自己的 date 欄位，表示這筆請假是哪一天的。
+如果同一位同仁跨多天請假，每天要各自一筆 leave，date 各自不同。
+如果同一位同仁同一天有多個不同時段，也要分成多筆 leave（date 相同但時間不同）。
+
+例如：
+「郁穎3/25 14:00-17:00、3/26 08:00-17:00、3/27 08:00-17:00」應拆成三筆：
+{{"name": "郁穎", "date": "2026-03-25", "leave_type": null, "start_time": "14:00", "end_time": "17:00"}}
+{{"name": "郁穎", "date": "2026-03-26", "leave_type": null, "start_time": "08:00", "end_time": "17:00"}}
+{{"name": "郁穎", "date": "2026-03-27", "leave_type": null, "start_time": "08:00", "end_time": "17:00"}}
+
+「張三3/10 0900-1200產檢假、1400-1800請休」應拆成兩筆：
+{{"name": "張三", "date": "2026-03-10", "leave_type": "產檢假", "start_time": "09:00", "end_time": "12:00"}}
+{{"name": "張三", "date": "2026-03-10", "leave_type": null, "start_time": "14:00", "end_time": "18:00"}}
 
 規則：
 1. 如果沒有提到年份，預設使用 {current_year} 年
@@ -103,15 +111,14 @@ def parse_event_with_claude(message_text):
 10. 主持人可能以「主持人」、「主席」、「召集人」等詞彙標示
 11. 請假中的「0213」代表 2 月 13 日，「0315」代表 3 月 15 日
 12. 請假時間如「(09-1030)」代表 09:00 到 10:30
-13. 如果請假跨多天，dates 要列出每一天
-14. 一則請假訊息中可能包含多位同仁的請假資訊
-15. 出席人員格式規則：
+13. 一則請假訊息中可能包含多位同仁的請假資訊
+14. 出席人員格式規則：
     - 人名後面的(O)代表會出席，(X)代表不出席，請保留這個標記，括號用半形
     - 「幕僚」後面的人名代表會議幕僚，請格式化為「幕僚(人名)」，括號用半形
     - 多位人員用頓號「、」分隔
     - 例如原文「朱理事長(O) 幕僚 貝珊」應整理成 attendees: ["朱理事長(O)", "幕僚(貝珊)"]，staff: "貝珊"
-16. location_city 只填縣市簡稱：台北市→台北、新北市→新北、桃園市→桃園、台中市→台中、台南市→台南、高雄市→高雄，以此類推。如果地點是線上或無法判斷縣市則填 null
-17. 請假假別（leave_type）辨識規則：
+15. location_city 只填縣市簡稱：台北市→台北、新北市→新北、桃園市→桃園、台中市→台中、台南市→台南、高雄市→高雄，以此類推。如果地點是線上或無法判斷縣市則填 null
+16. 請假假別（leave_type）辨識規則：
     - 如果訊息有註明假別，leave_type 填寫對應假別：「產假」、「產檢假」、「病假」、「喪假」、「事假」、「補休」、「特休」、「公假」、「婚假」等
     - 如果訊息只寫「請假」或「休假」而沒有具體假別，leave_type 填 null
     - 假別可能出現在人名前面或後面，例如「張三產檢假1小時」或「產檢假 張三1小時」
@@ -254,7 +261,6 @@ def parse_segments(entry_str):
     return name, [s.strip() for s in rest.split("、") if s.strip()]
 
 def parse_time_range(segment):
-    """從片段中提取起訖時間"""
     m = re.search(r"(\d{3,4})-(\d{3,4})", segment)
     if m:
         return int(m.group(1)), int(m.group(2))
@@ -274,17 +280,6 @@ def format_leave_segment(leave):
         return f"{s}-{e}{leave_type}"
     else:
         return f"{leave_type}（時間未指定）"
-
-def merge_leave_entries(leaves):
-    """將同一人的多筆請假合併成一行"""
-    grouped = OrderedDict()
-    for leave in leaves:
-        name = leave.get("name", "未知")
-        segment = format_leave_segment(leave)
-        if name not in grouped:
-            grouped[name] = []
-        grouped[name].append(segment)
-    return [f"{name}{'、'.join(segs)}" for name, segs in grouped.items()]
 
 def merge_into_existing(existing_entry, new_segments):
     """將新片段合併到既有記錄：時間不重疊→追加，重疊→覆蓋"""
@@ -306,11 +301,27 @@ def merge_into_existing(existing_entry, new_segments):
 def handle_leave(event_data):
     service = get_calendar_service()
     results = []
-    for date_str in event_data.get("dates", []):
+
+    # 按日期分組 leaves
+    leaves_by_date = OrderedDict()
+    for leave in event_data.get("leaves", []):
+        date_str = leave.get("date")
+        if not date_str:
+            # 向後相容：如果 leave 沒有 date，用 dates 清單的第一個
+            dates = event_data.get("dates", [])
+            date_str = dates[0] if dates else None
+        if not date_str:
+            continue
+        if date_str not in leaves_by_date:
+            leaves_by_date[date_str] = []
+        leaves_by_date[date_str].append(leave)
+
+    for date_str, day_leaves in leaves_by_date.items():
         existing = find_leave_event(service, date_str)
-        # 先把這次的 leaves 合併成 name -> [segments]
+
+        # 同一天的 leaves 按人名分組
         new_by_name = OrderedDict()
-        for leave in event_data.get("leaves", []):
+        for leave in day_leaves:
             name = leave.get("name", "未知")
             seg = format_leave_segment(leave)
             if name not in new_by_name:
@@ -320,18 +331,15 @@ def handle_leave(event_data):
         if existing:
             existing_leaves = parse_existing_leaves(existing.get("description", ""))
             for name, new_segs in new_by_name.items():
-                # 找到這個人的既有記錄
                 found_idx = None
                 for i, el in enumerate(existing_leaves):
                     if get_leave_name(el) == name:
                         found_idx = i
                         break
                 if found_idx is not None:
-                    # 合併到既有記錄（不重疊追加，重疊覆蓋）
                     merged = merge_into_existing(existing_leaves[found_idx], new_segs)
                     existing_leaves[found_idx] = merged
                 else:
-                    # 新人，直接加入
                     existing_leaves.append(f"{name}{'、'.join(new_segs)}")
             existing["description"] = format_leave_description(existing_leaves)
             service.events().update(calendarId=GOOGLE_CALENDAR_ID, eventId=existing["id"], body=existing).execute()
@@ -573,7 +581,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             logger.info(f"Parsed: {json.dumps(parsed_data, ensure_ascii=False)}")
             msg_type = parsed_data.get("type", "event")
             if msg_type == "leave":
-                if not parsed_data.get("dates") or not parsed_data.get("leaves"):
+                if not parsed_data.get("leaves"):
                     reply_message(reply_token, "⚠️ 無法從訊息中辨識出請假資訊，請確認訊息中有包含日期和請假人員。")
                     return
                 results = handle_leave(parsed_data)
