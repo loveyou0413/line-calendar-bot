@@ -63,6 +63,7 @@ def parse_event_with_claude(message_text):
     "type": "event",
     "title": "行程/會議名稱",
     "date": "YYYY-MM-DD",
+    "end_date": "YYYY-MM-DD",
     "start_time": "HH:MM",
     "end_time": "HH:MM",
     "location": "完整地點",
@@ -100,9 +101,9 @@ def parse_event_with_claude(message_text):
 
 規則：
 1. 如果沒有提到年份，預設使用 {current_year} 年
-2. 如果沒有提到結束時間，一般行程預設為開始時間後 1 小時
+2. 如果沒有提到結束時間，且有開始時間，一般行程預設為開始時間後 1 小時
 3. 如果某個欄位訊息中沒有提到，填入 null
-4. 日期請務必轉換成 YYYY-MM-DD 格式
+4. 日期請務必轉換成 YYYY-MM-DD（西元年）格式
 5. 時間請務必轉換成 24 小時制 HH:MM 格式
 6. 「下週一」「這週五」等相對日期請根據今天日期計算出確切日期
 7. 只回傳 JSON，不要有任何其他文字
@@ -122,6 +123,11 @@ def parse_event_with_claude(message_text):
     - 如果訊息有註明假別，leave_type 填寫對應假別：「產假」、「產檢假」、「病假」、「喪假」、「事假」、「補休」、「特休」、「公假」、「婚假」等
     - 如果訊息只寫「請假」或「休假」而沒有具體假別，leave_type 填 null
     - 假別可能出現在人名前面或後面，例如「張三產檢假1小時」或「產檢假 張三1小時」
+17. 民國年轉換：「115年」=西元2026年、「114年」=西元2025年，以此類推（民國年+1911=西元年）
+18. 跨天行程：
+    - 如果行程跨多天（例如「8月13日至8月15日」），date 填開始日期，end_date 填結束日期
+    - 如果行程只有一天，end_date 填 null
+    - 如果沒有明確的開始和結束時間（只有日期），start_time 和 end_time 填 null（代表全天事件）
 
 訊息內容：
 {message_text}"""
@@ -132,18 +138,22 @@ def parse_event_with_claude(message_text):
         response_text = response_text.rsplit("```", 1)[0].strip()
     return json.loads(response_text)
 
+def normalize_str(s):
+    """正規化字串：移除所有空白，用於模糊比對"""
+    return re.sub(r"\s+", "", s).strip()
+
 def find_duplicate_event(service, event_data):
     date_str = event_data["date"]
     events_result = service.events().list(
         calendarId=GOOGLE_CALENDAR_ID, timeMin=f"{date_str}T00:00:00+08:00",
         timeMax=f"{date_str}T23:59:59+08:00", singleEvents=True, orderBy="startTime").execute()
-    new_title = (event_data.get("title") or "").strip()
-    new_location = (event_data.get("location") or "").strip()
+    new_title = normalize_str(event_data.get("title") or "")
+    new_location = normalize_str(event_data.get("location") or "")
     for evt in events_result.get("items", []):
         if evt.get("summary") == "同仁休假登記":
             continue
-        evt_title = (evt.get("summary") or "").strip()
-        evt_location = (evt.get("location") or "").strip()
+        evt_title = normalize_str(evt.get("summary") or "")
+        evt_location = normalize_str(evt.get("location") or "")
         if (new_title and evt_title and new_title == evt_title) or (new_location and evt_location and new_location == evt_location):
             return evt
     return None
@@ -171,13 +181,36 @@ def build_event_body(event_data, message_timestamp=None):
     if message_timestamp:
         parts.append("")
         parts.append(f"⏱ 登記時間：{message_timestamp}")
+
     date_str = event_data["date"]
+    start_time = event_data.get("start_time")
+    end_time = event_data.get("end_time")
+    end_date = event_data.get("end_date")
+
     event = {
         "summary": event_data.get("title", "未命名行程"),
         "description": "\n".join(parts),
-        "start": {"dateTime": f"{date_str}T{event_data.get('start_time', '09:00')}:00", "timeZone": "Asia/Taipei"},
-        "end": {"dateTime": f"{date_str}T{event_data.get('end_time', '10:00')}:00", "timeZone": "Asia/Taipei"},
     }
+
+    if start_time:
+        # 有具體時間：用 dateTime 格式
+        event["start"] = {"dateTime": f"{date_str}T{start_time}:00", "timeZone": "Asia/Taipei"}
+        if end_time:
+            et_date = end_date if end_date else date_str
+            event["end"] = {"dateTime": f"{et_date}T{end_time}:00", "timeZone": "Asia/Taipei"}
+        else:
+            event["end"] = {"dateTime": f"{date_str}T{start_time}:00", "timeZone": "Asia/Taipei"}
+    else:
+        # 無具體時間：全天事件，用 date 格式
+        event["start"] = {"date": date_str}
+        if end_date:
+            # Google Calendar 的全天事件 end date 是 exclusive，要加一天
+            ed = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+            event["end"] = {"date": ed.strftime("%Y-%m-%d")}
+        else:
+            ed = datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)
+            event["end"] = {"date": ed.strftime("%Y-%m-%d")}
+
     if event_data.get("location"):
         event["location"] = event_data["location"]
     return event
@@ -198,9 +231,14 @@ def log_daily_event(event_data):
         daily_event_log = []
         daily_event_log_date = today_str
     date_str = event_data.get("date", "")
+    end_date = event_data.get("end_date")
     try:
         dt = datetime.strptime(date_str, "%Y-%m-%d")
-        meeting_date = f"{dt.month}/{dt.day}"
+        if end_date:
+            edt = datetime.strptime(end_date, "%Y-%m-%d")
+            meeting_date = f"{dt.month}/{dt.day}-{edt.month}/{edt.day}"
+        else:
+            meeting_date = f"{dt.month}/{dt.day}"
     except ValueError:
         meeting_date = date_str
     attendees = event_data.get("attendees") or []
@@ -238,7 +276,6 @@ def format_leave_description(entries):
     return "\n".join(f"{i}.{e}" for i, e in enumerate(entries, 1))
 
 def get_leave_name(entry_str):
-    """從請假記錄字串中提取人名"""
     leave_types = ["產檢假", "產假", "病假", "喪假", "事假", "補休", "特休", "公假", "婚假", "請休"]
     name_by_type = None
     for lt in leave_types:
@@ -255,7 +292,6 @@ def get_leave_name(entry_str):
     return name_by_type or name_by_digit or entry_str
 
 def parse_segments(entry_str):
-    """從合併後的字串提取人名和所有時段片段"""
     name = get_leave_name(entry_str)
     rest = entry_str[len(name):]
     return name, [s.strip() for s in rest.split("、") if s.strip()]
@@ -272,7 +308,6 @@ def times_overlap(s1, e1, s2, e2):
     return s1 < e2 and s2 < e1
 
 def format_leave_segment(leave):
-    """格式化單筆請假的時間+假別片段（不含姓名）"""
     leave_type = leave.get("leave_type") or "請休"
     s = leave.get("start_time", "").replace(":", "")
     e = leave.get("end_time", "").replace(":", "")
@@ -282,7 +317,6 @@ def format_leave_segment(leave):
         return f"{leave_type}（時間未指定）"
 
 def merge_into_existing(existing_entry, new_segments):
-    """將新片段合併到既有記錄：時間不重疊→追加，重疊→覆蓋"""
     name, existing_segs = parse_segments(existing_entry)
     result_segs = list(existing_segs)
     for new_seg in new_segments:
@@ -301,13 +335,10 @@ def merge_into_existing(existing_entry, new_segments):
 def handle_leave(event_data):
     service = get_calendar_service()
     results = []
-
-    # 按日期分組 leaves
     leaves_by_date = OrderedDict()
     for leave in event_data.get("leaves", []):
         date_str = leave.get("date")
         if not date_str:
-            # 向後相容：如果 leave 沒有 date，用 dates 清單的第一個
             dates = event_data.get("dates", [])
             date_str = dates[0] if dates else None
         if not date_str:
@@ -315,11 +346,8 @@ def handle_leave(event_data):
         if date_str not in leaves_by_date:
             leaves_by_date[date_str] = []
         leaves_by_date[date_str].append(leave)
-
     for date_str, day_leaves in leaves_by_date.items():
         existing = find_leave_event(service, date_str)
-
-        # 同一天的 leaves 按人名分組
         new_by_name = OrderedDict()
         for leave in day_leaves:
             name = leave.get("name", "未知")
@@ -327,7 +355,6 @@ def handle_leave(event_data):
             if name not in new_by_name:
                 new_by_name[name] = []
             new_by_name[name].append(seg)
-
         if existing:
             existing_leaves = parse_existing_leaves(existing.get("description", ""))
             for name, new_segs in new_by_name.items():
@@ -372,7 +399,13 @@ def verify_signature(body, signature):
     return hmac.compare_digest(base64.b64encode(h).decode("utf-8"), signature)
 
 def format_event_confirmation(event_data, action="登記"):
-    lines = [f"✅ 行程已{action}！", "", f"📌 {event_data.get('title', '未命名行程')}", f"📅 {event_data.get('date', '未指定')}"]
+    lines = [f"✅ 行程已{action}！", "", f"📌 {event_data.get('title', '未命名行程')}"]
+    date_str = event_data.get('date', '未指定')
+    end_date = event_data.get('end_date')
+    if end_date and end_date != date_str:
+        lines.append(f"📅 {date_str} ~ {end_date}")
+    else:
+        lines.append(f"📅 {date_str}")
     s, e = event_data.get("start_time", ""), event_data.get("end_time", "")
     if s and e:
         lines.append(f"🕐 {s} ~ {e}")
@@ -587,8 +620,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 results = handle_leave(parsed_data)
                 reply_message(reply_token, format_leave_confirmation(results))
             else:
-                if not parsed_data.get("date") or not parsed_data.get("start_time"):
-                    reply_message(reply_token, "⚠️ 無法從訊息中辨識出日期或時間，請確認訊息中有包含行程的日期和時間。")
+                if not parsed_data.get("date"):
+                    reply_message(reply_token, "⚠️ 無法從訊息中辨識出日期，請確認訊息中有包含行程的日期。")
                     return
                 service = get_calendar_service()
                 duplicate = find_duplicate_event(service, parsed_data)
