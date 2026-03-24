@@ -109,7 +109,9 @@ def parse_event_with_claude(message_text):
 7. 只回傳 JSON，不要有任何其他文字
 8. 線上會議資訊：如果訊息中有會議連結、會議號、密碼等資訊，請分別擷取
 9. 會議號和密碼可能用「/」分隔（例如「2510 771 7063/2026」表示會議號為「2510 771 7063」，密碼為「2026」）
-10. 主持人可能以「主持人」、「主席」、「召集人」等詞彙標示
+10. 主持人可能以「主持人」、「主席」、「召集人」等詞彙標示。注意：「講師」不是主持人，講師資訊請放在 notes 欄位
+    - 「工作人員」、「幕僚」等詞彙代表工作人員，請填入 staff 欄位
+    - staff 欄位也可以用來記錄負責的辦公室或單位（例如「台北辦公室」）
 11. 請假中的「0213」代表 2 月 13 日，「0315」代表 3 月 15 日
 12. 請假時間如「(09-1030)」代表 09:00 到 10:30
 13. 一則請假訊息中可能包含多位同仁的請假資訊
@@ -164,6 +166,8 @@ def build_event_body(event_data, message_timestamp=None):
         parts.append(f"🎤 主持人：{event_data['host']}")
     if event_data.get("attendees"):
         parts.append(f"📋 出席人員：{'、'.join(event_data['attendees'])}")
+    if event_data.get("staff"):
+        parts.append(f"📎 工作人員：{event_data['staff']}")
     has_meeting = event_data.get("meeting_url") or event_data.get("meeting_id") or event_data.get("meeting_password")
     if has_meeting:
         parts.append("")
@@ -417,6 +421,8 @@ def format_event_confirmation(event_data, action="登記"):
         lines.append(f"🎤 主持人：{event_data['host']}")
     if event_data.get("attendees"):
         lines.append(f"👥 {'、'.join(event_data['attendees'])}")
+    if event_data.get("staff"):
+        lines.append(f"📎 工作人員：{event_data['staff']}")
     if event_data.get("meeting_url") or event_data.get("meeting_id") or event_data.get("meeting_password"):
         lines.extend(["", "💻 線上會議資訊："])
         if event_data.get("meeting_url"):
