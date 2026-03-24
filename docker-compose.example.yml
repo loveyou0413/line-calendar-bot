@@ -5,15 +5,18 @@ services:
     build: .
     container_name: line-calendar-bot
     restart: always
-    ports:
-      - "8000:8000"
+    network_mode: host
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     environment:
       - LINE_CHANNEL_SECRET=你的Line_Channel_Secret
       - LINE_CHANNEL_ACCESS_TOKEN=你的Line_Channel_Access_Token
       - ANTHROPIC_API_KEY=你的Claude_API_Key
       - GOOGLE_CALENDAR_ID=你的Google日曆ID
       - ADMIN_USER_ID=你的Line_User_ID
-      - NAS_EXTERNAL_URL=你的NAS外部網址(例如https://yourname.synology.me:58443)
+      - NAS_EXTERNAL_URL=你的NAS外部網址(例如https://linebot.yourdomain.com)
+      - REPORT_DIR=/app/reports
       - REPORT_HOUR=18
       - PORT=8000
     volumes:
